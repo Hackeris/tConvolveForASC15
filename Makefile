@@ -44,6 +44,6 @@ run:	$(EXENAME)
 	./$(EXENAME)
 verify:	grid.dat
 	./verify
-a:
+test:
 	make run
 	make verify

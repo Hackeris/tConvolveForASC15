@@ -145,15 +145,20 @@ void Benchmark::gridKernel(const int support,
     omp_set_nested(true);
 
     //the cpu_scale_p of the whole calculation will give to cpu, others give to mic
+    // CPU和MIC的比重， CPU要多得多，为何？
     const double cpu_scale_p = 0.86;
+    // 计算CPU和MIC异构计算的任务量
     const int cpu_scale = int(cpu_scale_p * num); //It's that how many samples will give to cpu to calculate
     const int mic_scale = num - cpu_scale;
     printf("cpu calculate:%.3lf%%\nmic calculate:%.3lf%%\n", cpu_scale_p*100, (1.0 - cpu_scale_p)*100);
 
     //compute gind dind & cind and sort into struct array: index
+    // 任务划分，两个数组
     Index *index = new Index[num];
     Index *cpu_index = &index[0];//from index[0] to index[cpu_scale - 1] belong to cpu calculate
     Index *mic_index = &index[cpu_scale];//from index[cpu_scale] to index[num - 1] belong to mic calculate
+    // 为何要静态，也许是方便调参数
+    // 并行地赋初值
     #pragma omp parallel for schedule(static) num_threads(max_threads)
     for(int i = 0; i < max_threads; i++)
     {
@@ -172,6 +177,8 @@ void Benchmark::gridKernel(const int support,
     int mic_grid_begin_index = gSz, mic_grid_end_index = 0, mic_grid_transfer_size = 0;
 
     //sort index array according to gind
+    // 为了求Lower bound，划分数据集为不相关的区间。先排序
+    // cpu部分的排序和mic部分的排序是并发的，因此放在两个section里
     #pragma omp parallel sections
     {
         #pragma omp section
@@ -191,6 +198,9 @@ void Benchmark::gridKernel(const int support,
     //divide index into groups according to gind's row index
     int *mic_index_group = new int[gSize + 1];
     int *cpu_index_group = new int[gSize + 1];
+    // 计算lower_bound。仍然是static
+    // 这样的lower_bound看起来不合理，应该是保证两段之间的距离不小于gSize即可
+    // 因此这个lower_bound可能应该是前后数据相关的
     #pragma omp parallel for schedule(static) num_threads(max_threads)
     for(int i = 0; i < max_threads; i++)
     {
@@ -205,6 +215,7 @@ void Benchmark::gridKernel(const int support,
         }
     }
 
+    // 又划分任务
     int mic_begin_group_index = std::upper_bound(mic_index_group, mic_index_group + gSize + 1,
                                 0) - mic_index_group;
     int mic_end_group_index = std::lower_bound(mic_index_group, mic_index_group + gSize + 1,
@@ -218,6 +229,7 @@ void Benchmark::gridKernel(const int support,
 
 
     //sort a row according to cind
+    // 为什么还要在组内按照cind排序呢？
     #pragma omp parallel for schedule(static) num_threads(max_threads)
     for(int i = 0; i < max_threads; i++)
     {
@@ -236,6 +248,7 @@ void Benchmark::gridKernel(const int support,
     }
 
 
+    // 为什么要拷贝呢？
     // copy data from samples.data
     Value *data = new Value[num];
     #pragma omp parallel for schedule(static) num_threads(max_threads)
@@ -286,6 +299,7 @@ void Benchmark::gridKernel(const int support,
                 Value *data = (Value*)pdata;
                 Value *mic_grid = (Value*)pgrid;
 
+                // 对各个分组的所有样本进行计算
                 #pragma omp parallel for schedule(dynamic)
                 for(int now_row = mic_begin_group_index; now_row < mic_end_group_index; now_row++)
                 {
@@ -299,16 +313,19 @@ void Benchmark::gridKernel(const int support,
 
                         for(int now_index = mic_index_group[now_group - 1]; now_index < mic_index_group[now_group]; now_index++)
                         {
+                            // y = a*x + y的库函数
                             cblas_zaxpy(sSize, &data[mic_index[now_index].dind], &mC[mic_index[now_index].cind + cind_add], 1, &mic_grid[mic_index[now_index].gind + gind_add], 1);
                         }
                     }
                 }
             }
         }
+        // CPU部分的运算，这部分和前面部分为何要用omp section？？
         #pragma omp section
         if(cpu_scale != 0)//if cpu_scale == 0, that's cpu don't need calculate
         {
             /*********** cpu calculate part ****************/
+            // 和MIC端代码几乎一样
             #pragma omp parallel for schedule(dynamic) num_threads(max_threads)
             for(int now_row = cpu_begin_group_index; now_row < cpu_end_group_index; now_row++)
             {
@@ -329,6 +346,7 @@ void Benchmark::gridKernel(const int support,
         }
     }
     //gather the result
+    // gather结果
     Value a(1.0, 0.0);
     #pragma omp parallel for schedule(static) num_threads(max_threads)
     for(int i = 0; i < max_threads; i++)
@@ -347,6 +365,7 @@ inline bool cmp_cind(Index a, Index b)
     return a.cind < b.cind;
 }
 
+// 并行的归并排序
 void parallel_sort(int l, int r, Index *index, int parallel_num)
 {
     if(!parallel_num)
@@ -360,6 +379,8 @@ void parallel_sort(int l, int r, Index *index, int parallel_num)
         if(Sz <= 0)
             return ;
         int Sz1 = (Sz >> 1), Sz2 = Sz - Sz1;
+        // 使用递归效率应该会低
+        // 还是双调排序更好
         #pragma omp parallel sections num_threads(2)
         {
             #pragma omp section
